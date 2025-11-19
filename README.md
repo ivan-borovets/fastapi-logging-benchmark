@@ -257,4 +257,4 @@ how much numbers "wander".
 
 > — So, should we handle logs asynchronously?
 >
-> — Only when low and stable latency isn’t a big deal
+> — Only if you can afford to lose low and stable latency
