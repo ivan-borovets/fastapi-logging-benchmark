@@ -1,14 +1,29 @@
-# Should we handle logs asynchronously?
+> Should we handle logs asynchronously?
+
+# Table of contents
+
+1. [Problem statement](#problem-statement)
+2. [Goals](#goals)
+3. [Design](#design)
+4. [Cases and run modes](#cases-and-run-modes)
+5. [Limitations](#limitations)
+6. [Test environment](#test-environment)
+7. [How to run](#how-to-run)
+8. [Adding your own case](#adding-your-own-case)
+9. [Results](#results)
+10. [Conclusions](#conclusions)
+11. [TLDR](#tldr)
 
 # Problem statement
 
 * In practice, logging to `stdout` is usually done via blocking I/O
 * Blocking I/O can be offloaded to a separate thread at some cost
-* **Does offloading logging to a separate thread pay off in terms of HTTP response time?**
+* **Under load, does offloading logging to a separate thread pay off in terms of HTTP response time?**
 
 # Goals
 
-* Perform comparative analysis of common logging approaches by median response time from ASGI app endpoint
+* Perform comparative analysis of common logging approaches under a fixed load profile by median response time from ASGI
+  app endpoint
 * Find out whether the most efficient logging setups actually process logs off the main thread
 
 # Design
@@ -223,13 +238,13 @@ Approximate median response times for one set of runs:
 * `structlog_experimental_orjson` grew with load more smoothly: median increased with more logs and longer runs but
   stayed in tens–hundreds of milliseconds range
 * `stdlib_queue_orjson` and `aiologger_no_await_orjson` looked good under base load (`400 / 1m`) but as `n_logs_req`
-  increased, their median moved into hundreds-of-milliseconds range and significantly exceeded
+  increased, their median jumped into hundreds-of-milliseconds range and significantly exceeded
   `structlog_experimental_orjson` in overhead
 
 Currently, repeated benchmark runs, collecting statistics across runs and tail analysis (p95/p99) are not automated:
 this can be done manually by running `benchmark` multiple times with same parameters. When comparing results, it makes
-sense to look not only at single metric value (median, p95), but also at spread between min and max across runs to see
-how much numbers "wander".
+sense to look not only at single metric value (median, p95), but also at the min–max spread across runs to see how much
+the results vary
 
 # Conclusions
 
@@ -241,14 +256,13 @@ how much numbers "wander".
   you need predictable median latency under intensive logging
 * Queue-based configurations (`stdlib_queue_*`) and fire-and-forget (`aiologger_no_await_orjson`) can provide low median
   latency under light load, but show significantly higher run-to-run variability and degradation when number of logs
-  and run time increase. Under strict latency-stability requirements these variants are not recommended as primary
-  solution in this methodology
+  increase. They are not a good choice when you have strict latency and stability requirements
 * Using async logger APIs with `await` in handler (`aiologger_with_await_*`, `structlog_async_*`) consistently produced
   median latencies orders of magnitude higher than baseline and synchronous/no-await counterparts
   (hundreds–thousands of milliseconds vs tens). For tested profile, logging with `await` in HTTP critical path is the
   most expensive option and is not recommended when low latency is priority
-* For tested configurations and load profile, offloading logging from main thread to separate thread or background
-  worker **does not provide stable win** in HTTP response time. In terms of median response time, simple synchronous
+* For tested configurations and load profile, **offloading logging from main thread to separate thread or background
+  worker does not provide stable win** in HTTP response time. In terms of median response time, simple synchronous
   solutions with fast JSON serializer (e.g. `orjson`) look preferable
 * All conclusions apply to specific configurations, load profile and environment of this setup and describe relative
   behaviour of tested cases, not universal ranking of logging solutions
@@ -257,4 +271,6 @@ how much numbers "wander".
 
 > — So, should we handle logs asynchronously?
 >
-> — Only if you can afford to lose low and stable latency
+> — Only if you can afford to sacrifice low and **stable** latency
+
+If in doubt, use synchronous logging to `stdout` with `orjson`, and avoid `await` in the hot path
