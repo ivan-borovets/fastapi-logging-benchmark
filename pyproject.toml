@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.13"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+sources = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/benchmark"]
+
+[project]
+name = "loggers-benchmark"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+authors = [
+    { name = "ivan-borovets", email = "130386813+ivan-borovets@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiologger==0.7.0",
+    "fastapi==0.121.1",
+    "locust>=2.42.3",
+    "orjson==3.11.4",
+    "rich>=14.2.0",
+    "structlog==25.5.0",
+    "uvicorn==0.38.0",
+]
+[dependency-groups]
+dev = [
+    "mypy==1.17.0",
+    "pre-commit==4.2.0",
+    "ruff==0.12.5",
+]
+
+[project.scripts]
+benchmark = "benchmark.main:main"
+
+[tool.mypy]
+files = [
+    "src",
+]
+strict = true
+ignore_missing_imports = true
+allow_subclassing_any = true
+disallow_untyped_defs = false
+plugins = []
+
+[tool.ruff]
+line-length = 88
+preview = true  # experimental
+
+[tool.ruff.format]
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+force-wrap-aliases = true
+split-on-trailing-comma = true
