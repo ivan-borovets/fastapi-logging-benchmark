@@ -22,6 +22,7 @@ class RunBenchRequest:
 @dataclass(slots=True, frozen=True)
 class RunBenchResponse:
     output_path: Path
+    log_lines_delivered: int
 
 
 class RunBench:
@@ -48,9 +49,11 @@ class RunBench:
 
         try:
             with self._server_mgr.run(bench_case) as ctx:  # type: ignore[attr-defined]
+                lines_before = self._server_mgr.log_lines_delivered()
                 output_path = self._load_tester.run(bench_case, ctx)
+                lines_after = self._server_mgr.log_lines_delivered()
         except Exception as e:
             raise BenchRunError(f"Failed to run {bench_case.title}") from e
 
         self._listener.on_complete(event)
-        return RunBenchResponse(output_path)
+        return RunBenchResponse(output_path, lines_after - lines_before)

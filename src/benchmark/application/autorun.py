@@ -52,9 +52,13 @@ class AutoRun:
                     metadata=bench_req.metadata,
                 )
             )
-            run_result_path = self._run_bench.execute(bench_req).output_path
+            run_result = self._run_bench.execute(bench_req)
             parsed_stats = self._parse_bench_run.execute(
-                ParseBenchRunRequest(bench_req.metadata, run_result_path)
+                ParseBenchRunRequest(
+                    metadata=bench_req.metadata,
+                    stats_file=run_result.output_path,
+                    log_lines_delivered=run_result.log_lines_delivered,
+                )
             )
             results.append(parsed_stats)
             self._listener.on_bench_completed(BenchCompletedEvent(parsed_stats))

@@ -14,8 +14,9 @@ from benchmark.adapters.locust_constants import (
     RUN_TIME_DEFAULT,
 )
 from benchmark.adapters.listener_terminal import TerminalProgressListener
+from benchmark.adapters.log_sink import LogSinkProfile
 from benchmark.adapters.renderer_terminal import TerminalSummaryRenderer
-from benchmark.adapters.results_parser_csv import CsvResultsParser
+from benchmark.adapters.results_parser_json import JsonResultsParser
 from benchmark.adapters.server_manager_uvicorn import UvicornServerManager
 from benchmark.application.analyze_bench_runs import AnalyzeBenchRuns
 from benchmark.application.autorun import AutoRun, AutoRunRequest
@@ -31,6 +32,7 @@ from benchmark.cases import (
 
 
 def setup_autorun(
+    sink_profile: LogSinkProfile,
     locustfile: Path = LOCUSTFILE_PATH,
     output_dir: Path = OUTPUT_DIR_PATH,
     n_users: int = N_USERS_DEFAULT,
@@ -39,7 +41,7 @@ def setup_autorun(
     listener = TerminalProgressListener()
     return AutoRun(
         run_bench=RunBench(
-            server_mgr=UvicornServerManager(),
+            server_mgr=UvicornServerManager(sink_profile),
             load_tester=LocustLoadTester(
                 locustfile=locustfile,
                 output_dir=output_dir,
@@ -48,7 +50,7 @@ def setup_autorun(
             ),
             listener=listener,
         ),
-        parse_bench_run=ParseBenchRun(results_parser=CsvResultsParser()),
+        parse_bench_run=ParseBenchRun(results_parser=JsonResultsParser()),
         analyze_bench_runs=AnalyzeBenchRuns(),
         listener=listener,
     )
@@ -82,6 +84,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Shuffle order of cases before running",
     )
+    p.add_argument(
+        "--sink-pause-ms",
+        type=_non_negative_int,
+        default=0,
+        help="Log collector stall duration; 0 drains server output without pauses",
+    )
+    p.add_argument(
+        "--sink-pause-every-ms",
+        type=_non_negative_int,
+        default=1000,
+        help="Log collector reading time between stalls",
+    )
     return p.parse_args()
 
 
@@ -99,12 +113,23 @@ def main() -> None:
         cases = cases_factory(n_logs_req=args.n_logs_req, run_time=args.run_time)
         if args.shuffle:
             random.shuffle(cases)
-        autorun = setup_autorun()
-        renderer = TerminalSummaryRenderer()
+        sink_profile = LogSinkProfile(
+            pause_ms=args.sink_pause_ms,
+            pause_every_ms=args.sink_pause_every_ms,
+        )
+        autorun = setup_autorun(sink_profile)
+        renderer = TerminalSummaryRenderer(sink_profile)
         summary = autorun.execute(AutoRunRequest(cases))
         renderer.render(summary)
     except KeyboardInterrupt:
         print("Interrupted. Shutting down...")
+
+
+def _non_negative_int(raw: str) -> int:
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {value}")
+    return value
 
 
 if __name__ == "__main__":

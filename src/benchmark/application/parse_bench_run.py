@@ -10,6 +10,7 @@ from benchmark.application.dtos import BenchMetadata, BenchResult
 class ParseBenchRunRequest:
     metadata: BenchMetadata
     stats_file: Path
+    log_lines_delivered: int
 
 
 class ParseBenchRun:
@@ -24,4 +25,8 @@ class ParseBenchRun:
                 f"Failed to parse {request.metadata.bench_title}: {e}"
             ) from e
 
-        return BenchResult(metadata=request.metadata, stats=stats)
+        return BenchResult(
+            metadata=request.metadata,
+            stats=stats,
+            log_lines_delivered=request.log_lines_delivered,
+        )

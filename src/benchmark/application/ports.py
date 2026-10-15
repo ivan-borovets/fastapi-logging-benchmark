@@ -14,6 +14,8 @@ from benchmark.domain.bench_case import BenchCase
 class ServerManager(Protocol):
     @abstractmethod
     def run(self, bench_case: BenchCase) -> Iterator[RunContext]: ...
+    @abstractmethod
+    def log_lines_delivered(self) -> int: ...
 
 
 class LoadTester(Protocol):

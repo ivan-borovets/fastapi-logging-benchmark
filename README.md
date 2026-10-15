@@ -12,7 +12,8 @@
 8. [Adding your own case](#adding-your-own-case)
 9. [Results](#results)
 10. [Conclusions](#conclusions)
-11. [TLDR](#tldr)
+11. [Recommendations](#recommendations)
+12. [TLDR](#tldr)
 
 # Problem statement
 
@@ -22,9 +23,10 @@
 
 # Goals
 
-* Perform comparative analysis of common logging approaches under a fixed load profile by median response time from ASGI
-  app endpoint
-* Find out whether the most efficient logging setups actually process logs off the main thread
+* Perform comparative analysis of common logging approaches under a fixed load profile by median and tail response time
+  from ASGI app endpoint
+* Compare them with log collector that reads `stdout` without pauses and with collector that stalls
+* Check whether offloaded logging keeps up with load or defers work past measured window
 
 # Design
 
@@ -34,28 +36,37 @@
 3. Benchmarker application receives list of cases (metadata + app factory) and processes them sequentially
 4. For each case FastAPI app is started in separate process via `uvicorn` on free port. After a simple healthcheck
    (request to case endpoint with `n=1`), separate `subprocess` is started with `locust` in headless mode for same case
-5. By default `locust` is configured to hit endpoint at roughly uniform rate of **~100 RPS**:
-    * 50 "users" are created
-    * each generates around 2 RPS
-    * users are spawned at 10 users/sec
+5. App `stdout` and `stderr` go to single pipe, read by log collector thread of benchmarker, as container runtime does.
+   Collector can stop reading for `--sink-pause-ms` after every `--sink-pause-every-ms` of reading: pipe buffer
+   (64 KiB by default on Linux) fills up and writes to `stdout` block. Without pauses collector reads continuously
+6. By default `locust` is configured to hit endpoint at roughly uniform rate of **~100 RPS**:
+    * 400 "users" are created
+    * each generates around 0.25 RPS
+    * users are spawned at 100 users/sec
     * run time is `60s` by default
-6. Each case uses same number of logs per HTTP request (`n_logs_req`), passed as parameter to app and controlling how
+
+   `locust` users are closed-loop: each one waits for response before next request. Many slow users keep target rate
+   until response time reaches 4s, so slow case doesn't lower its own load and hide its latency
+7. Each case uses same number of logs per HTTP request (`n_logs_req`), passed as parameter to app and controlling how
    many times logger is called inside handler
-7. Log format is maximally standardized: all loggers are brought to common JSON format aligned with `aiologger`
+8. Log format is maximally standardized: all loggers are brought to common JSON format aligned with `aiologger`
    output (timestamp, level, file path, function, line number, message). `aiologger` format is chosen as reference
    because it is hardest to customize; other loggers can be matched to it via their formatters. This allows comparing
    primarily logging overhead, not differences in log format
-8. `locust` results for each case are stored in CSV file. From it, aggregated row (`Name == "Aggregated"`) is read and
-   the following values are extracted:
-    * `Median Response Time`
-    * `Average Response Time`
-    * actual `Requests/s`
+9. When run time is over, `locust` lets in-flight requests finish (`--stop-timeout`) and saves stats to JSON file.
+   From it, the following values are extracted:
+    * median, p95 and p99 response time
+    * average response time
+    * actual RPS
     * number of requests and failures
-9. Based on these data, comparative analysis is built:
+10. Collector counts log lines received while `locust` runs. Their share of `requests * n_logs_req` shows whether
+    logger keeps up: below 100% means logs are queued and their cost is deferred past measured window
+11. Based on these data, comparative analysis is built:
     * for `baseline`, its median response time is fixed
     * for all other cases, median and overhead relative to `baseline` are calculated (in milliseconds and percent)
-10. Finally, summary table is printed for all cases, showing `baseline`, best variant, and full list of median response
-    times
+12. Finally, summary table is printed for all cases, showing `baseline`, best variant, and full list of response
+    times, actual RPS and share of delivered logs. Cases that didn't sustain 90% of target RPS or had failures are
+    marked as not comparable
 
 # Cases and run modes
 
@@ -94,13 +105,12 @@ For convenience, several predefined case sets ("modes") are provided:
   Only cases where JSON is serialized via `orjson`: `baseline` and all `*_orjson` variants, including
   `structlog_experimental_orjson`
 * **`fastest`**  
-  Set of cases that in this methodology usually end up in top part of table by median response time for given load
-  profile. Useful when you want to quickly inspect "fast" configurations without running full `all`
+  `baseline`, synchronous `orjson` cases and `aiologger_no_await_orjson`. Useful when you want to quickly inspect
+  fast configurations without running full `all`
 * **`stable_vs_unstable`**  
-  Compact set with `baseline` and several contrasting logging approaches: some behave more stably (median and relative
-  ordering of cases change little between runs), others are noticeably more sensitive to load changes and environment
-  noise. This mode is useful if you want to play with `--n-logs-req` and `--time` and manually see how different logging
-  strategies react to increased load and longer runs
+  Compact set with `baseline`, synchronous `structlog_experimental_orjson` and offloaded `stdlib_queue_orjson` and
+  `aiologger_no_await_orjson`. Useful to play with `--n-logs-req`, `--time` and collector stalls and see how
+  synchronous and offloaded logging react
 
 `baseline` is always present in all modes so that overhead can be compared against single reference point.
 
@@ -114,15 +124,18 @@ For convenience, several predefined case sets ("modes") are provided:
   For each case single-process `uvicorn` is started (one worker). Scenarios with multiple workers, separate logging
   processes or distributed systems are not considered
 * **Only `stdout` and JSON logs.**  
-  All cases write structured JSON logs to `stdout`. Variants with file output, network logging, external log systems or
-  non-JSON/plain-text logging are not compared
+  All cases write structured JSON logs to `stdout`/`stderr` pipe. Collector stalls are synthetic periodic pauses, not
+  model of specific log driver. Variants with file output, network logging, external log systems or non-JSON/plain-text
+  logging are not compared
+* **Shared machine.**  
+  App, log collector and `locust` run on same machine and compete for CPU
 * **Fixed load profile.**  
   Load is defined by single scenario: ~100 RPS for `60s` with simple `GET` requests doing no useful work in endpoint
   besides logging. Behaviour under other load profiles, run durations or request types is not examined
 * **Limited set of metrics.**  
-  Analysis relies on aggregated `locust` statistics (row `Name == "Aggregated"`): `Median Response Time`,
-  `Average Response Time`, actual `Requests/s`, number of requests and failures. Tail latencies (p95/p99), full
-  latency distributions, CPU/memory usage etc. are not considered
+  Analysis relies on `locust` statistics: median, p95/p99 and average response time, actual RPS, number of requests
+  and failures, plus share of delivered logs. Full latency distributions, CPU/memory usage, delivery delay of each log
+  etc. are not considered. Stats include 4-second ramp-up of `locust` users
 * **Sequential case runs.**  
   Cases are executed sequentially in single process. By default, order is fixed; `--shuffle` option randomly shuffles it
   and reduces systematic position bias. There is 5-second pause between cases (`COOLDOWN_BETWEEN_CASES_S`) to slightly
@@ -131,14 +144,14 @@ For convenience, several predefined case sets ("modes") are provided:
   Comparison covers specific `logging`, `aiologger` and `structlog` configurations used in this project. Results do
   not automatically generalize to other configurations, handlers or processor chains of same libraries
 * **Stochastic results.**  
-  Even with fixed settings, individual runs may differ significantly due to environment noise (background processes,
-  scheduler, warm-up, etc.). For queue-based and background logging configurations (e.g. `stdlib_queue_*`,
-  `aiologger_no_await_*`) spread can be especially noticeable. In practice, it makes sense to run benchmark multiple
-  times and look at stability of relative ordering rather than relying on single run
+  Even with fixed settings, individual runs may differ due to environment noise (background processes, scheduler,
+  warm-up, etc.). In practice, it makes sense to run benchmark multiple times and look at stability of relative
+  ordering rather than relying on single run
 
 # Test environment
 
-`Intel Core i5-8250U` (4c/8t), `8 GB RAM`, `LMDE 6`, `Python 3.13.7`. Exact dependency versions are in `uv.lock`.
+`Intel Core i7-1365U` (10c/12t), `32 GB RAM`, `Ubuntu 22.04`, `Python 3.13.9`. Exact dependency versions are in
+`uv.lock`.
 
 # How to run
 
@@ -161,18 +174,28 @@ It is recommended to run `benchmark` in regular OS terminal, not in embedded IDE
 
 ```text
 usage: benchmark [-h] [--mode {all,fastest,json,orjson,stable_vs_unstable}] [--n-logs-req N_LOGS_REQ] [--time RUN_TIME] [--shuffle]
+                 [--sink-pause-ms SINK_PAUSE_MS] [--sink-pause-every-ms SINK_PAUSE_EVERY_MS]
 ```
 
 * `--mode {all,fastest,json,orjson,stable_vs_unstable}` — preset of cases (see "Cases and modes"). Default: `fastest`
 * `--n-logs-req N_LOGS_REQ` — number of logs per HTTP request (default: `400`)
 * `--time RUN_TIME` — `locust` run time, e.g. `30s`, `60s`, `2m` (default: `60s`)
 * `--shuffle` — shuffle case order before running to reduce impact of fixed order on results (default: off)
+* `--sink-pause-ms SINK_PAUSE_MS` — log collector stall duration; `0` drains pipe without pauses (default: `0`)
+* `--sink-pause-every-ms SINK_PAUSE_EVERY_MS` — collector reading time between stalls (default: `1000`)
+
+Hypothesis is checked by comparing same cases with fast and stalling collector:
+
+```shell
+benchmark --mode orjson --shuffle
+benchmark --mode orjson --shuffle --sink-pause-ms 100 --sink-pause-every-ms 500
+```
 
 You can also manually run app factory module and `locust` separately.
 For example, for factory `yourfactory` on `http://127.0.0.1:8000`, `locust` run may look like:
 
 ```shell
-locust -f src/benchmark/adapters/locustfile.py --headless -u 50 -r 10 -t 1m --tag yourfactory --n-logs-req 400 --host "http://127.0.0.1:8000"
+locust -f src/benchmark/adapters/locustfile.py --headless -u 400 -r 100 -t 1m --stop-timeout 10 --tag yourfactory --n-logs-req 400 --host "http://127.0.0.1:8000"
 ```
 
 # Adding your own case
@@ -186,91 +209,95 @@ locust -f src/benchmark/adapters/locustfile.py --headless -u 50 -r 10 -t 1m --ta
 
 # Results
 
-* Under given settings (400 logs/endpoint, ~100 RPS, 60s, JSON to `stdout`) `baseline` consistently showed median
-  response time around ~20 ms and served as reference point for estimating overhead
-* For every pair "same logging approach + `json` vs `orjson`", `orjson` variant never had higher median than its
-  counterpart on stdlib `json`
-* `structlog_experimental_orjson`, `structlog_sync_orjson` and `stdlib_stream_orjson` consistently appeared in upper
-  part of median ranking among logging cases
-* Configurations using `await` in handler (`aiologger_with_await_*`, `structlog_async_*`) had median values orders of
-  magnitude higher than `baseline` and their synchronous/no-await counterparts (hundreds–thousands of milliseconds
-  versus tens)
-* For `stdlib_queue_*` and `aiologger_no_await_orjson` median varied noticeably between runs: in some runs they were
-  close to leaders, in others they lagged significantly behind stream/structlog-sync
+Collector profiles: without pauses and stalling (`--sink-pause-ms 100 --sink-pause-every-ms 500`: stops for 100 ms after
+every 500 ms of reading). Target load: 100 RPS. All cases except `structlog_async_*` sustained target load without
+failures and delivered 100% of logs before load ended.
 
-As illustration, here is sample run for "stable" `orjson`-based cases:
+**400 logs/request**, 60 s per case, one run per profile (`--mode all` without pauses, `--mode orjson` stalling).
+Response time in ms, median / p95 / p99:
 
-| Case                            | Median (ms) | Overhead vs baseline |
-|---------------------------------|------------:|---------------------:|
-| `baseline`                      |          20 |           0% (+0 ms) |
-| `structlog_experimental_orjson` |         110 |       +450% (+90 ms) |
-| `structlog_sync_orjson`         |         120 |      +500% (+100 ms) |
-| `stdlib_stream_orjson`          |         150 |      +650% (+130 ms) |
-| `aiologger_with_await_orjson`   |         570 |     +2750% (+550 ms) |
-| `structlog_async_orjson`        |        1700 |    +8400% (+1680 ms) |
+| Case                            |     Without pauses |           Stalling | Median change |
+|---------------------------------|-------------------:|-------------------:|--------------:|
+| `baseline`                      |       35 / 53 / 59 |       31 / 52 / 73 |            -4 |
+| `structlog_experimental_orjson` |    190 / 400 / 630 |    280 / 470 / 720 |           +90 |
+| `structlog_sync_orjson`         |    210 / 460 / 580 |    320 / 650 / 860 |          +110 |
+| `stdlib_stream_orjson`          |    230 / 520 / 840 |    330 / 550 / 830 |          +100 |
+| `stdlib_queue_orjson`           |    230 / 500 / 660 |    220 / 430 / 530 |           -10 |
+| `aiologger_no_await_orjson`     |   260 / 810 / 1100 |    210 / 460 / 620 |           -50 |
+| `aiologger_with_await_orjson`   |   650 / 960 / 1300 |  620 / 1200 / 1400 |           -30 |
+| `structlog_async_orjson`        |   ~20 s, 26 RPS \* |   ~22 s, 24 RPS \* |             — |
+| `stdlib_queue_json`             |    210 / 420 / 540 |                  — |             — |
+| `structlog_sync_json`           |    250 / 550 / 740 |                  — |             — |
+| `stdlib_stream_json`            |   310 / 740 / 1000 |                  — |             — |
+| `aiologger_no_await_json`       |  320 / 1100 / 1300 |                  — |             — |
+| `aiologger_with_await_json`     | 1400 / 5100 / 5400 |                  — |             — |
+| `structlog_async_json`          |   ~21 s, 25 RPS \* |                  — |             — |
 
-Numbers are for single run on specific machine and are meant only as illustration of relative ordering
+\* target load not sustained, not comparable
 
-To illustrate behaviour under changing load, four cases from `stable_vs_unstable` mode were considered separately:
+**10 logs/request**, `--mode stable_vs_unstable`, 20 s per case without pauses and 60 s stalling:
 
-* `baseline` — no logging
-* `structlog_experimental_orjson` — representative of fast and relatively stable configurations
-* `stdlib_queue_orjson` and `aiologger_no_await_orjson` — representatives of potentially fast but more
-  load-/noise-sensitive configurations (queue and fire-and-forget)
+| Case                            | Without pauses |        Stalling | Median change |
+|---------------------------------|---------------:|----------------:|--------------:|
+| `baseline`                      |   33 / 51 / 55 |    28 / 53 / 59 |            -5 |
+| `structlog_experimental_orjson` |   31 / 65 / 73 | 120 / 140 / 170 |           +89 |
+| `stdlib_queue_orjson`           |   39 / 90 / 94 |    36 / 59 / 66 |            -3 |
+| `aiologger_no_await_orjson`     |   38 / 64 / 68 |    35 / 63 / 69 |            -3 |
 
-These cases were run under four combinations of `n_logs_req` and `run_time`:
-
-* 400 logs, 1 minute (`400 / 1m`)
-* 600 logs, 1 minute (`600 / 1m`)
-* 400 logs, 2 minutes (`400 / 2m`)
-* 600 logs, 2 minutes (`600 / 2m`)
-
-Approximate median response times for one set of runs:
-
-| Profile       | `baseline` | `structlog_experimental_orjson` | `stdlib_queue_orjson` | `aiologger_no_await_orjson` |
-|---------------|-----------:|--------------------------------:|----------------------:|----------------------------:|
-| 400 logs / 1m |      18 ms |                          110 ms |                 47 ms |                      160 ms |
-| 600 logs / 1m |      19 ms |                          170 ms |                630 ms |                      720 ms |
-| 400 logs / 2m |      24 ms |                          120 ms |                 30 ms |                       80 ms |
-| 600 logs / 2m |      23 ms |                          160 ms |                630 ms |                      680 ms |
-
-* `baseline` stayed around 20–25 ms across all profiles
-* `structlog_experimental_orjson` grew with load more smoothly: median increased with more logs and longer runs but
-  stayed in tens–hundreds of milliseconds range
-* `stdlib_queue_orjson` and `aiologger_no_await_orjson` looked good under base load (`400 / 1m`) but as `n_logs_req`
-  increased, their median jumped into hundreds-of-milliseconds range and significantly exceeded
-  `structlog_experimental_orjson` in overhead
-
-Currently, repeated benchmark runs, collecting statistics across runs and tail analysis (p95/p99) are not automated:
-this can be done manually by running `benchmark` multiple times with same parameters. When comparing results, it makes
-sense to look not only at single metric value (median, p95), but also at the min–max spread across runs to see how much
-the results vary
+Medians of one case differed by up to 30 ms between repeated short runs. Smaller differences between cases are noise
 
 # Conclusions
 
-* Under given settings (400 logs/endpoint, ~100 RPS, 60s, JSON to `stdout`), logging significantly increases median
-  response time compared to `baseline` without logs: there is no "almost free" logging at this load level
-* JSON serializer choice matters: in all tested configurations `orjson` variant was never slower than its stdlib
-  `json` counterpart and typically showed lower overhead
-* Synchronous `structlog`+`orjson` and stream-based `logging`+`orjson` configurations look like most robust choice when
-  you need predictable median latency under intensive logging
-* Queue-based configurations (`stdlib_queue_*`) and fire-and-forget (`aiologger_no_await_orjson`) can provide low median
-  latency under light load, but show significantly higher run-to-run variability and degradation when number of logs
-  increase. They are not a good choice when you have strict latency and stability requirements
-* Using async logger APIs with `await` in handler (`aiologger_with_await_*`, `structlog_async_*`) consistently produced
-  median latencies orders of magnitude higher than baseline and synchronous/no-await counterparts
-  (hundreds–thousands of milliseconds vs tens). For tested profile, logging with `await` in HTTP critical path is the
-  most expensive option and is not recommended when low latency is priority
-* For tested configurations and load profile, **offloading logging from main thread to separate thread or background
-  worker does not provide stable win** in HTTP response time. In terms of median response time, simple synchronous
-  solutions with fast JSON serializer (e.g. `orjson`) look preferable
-* All conclusions apply to specific configurations, load profile and environment of this setup and describe relative
-  behaviour of tested cases, not universal ranking of logging solutions
+* **Collector stalls add their duration to response time of synchronous logging.** With stalling collector median of
+  synchronous cases grew by 90–110 ms at 400 logs/request and by 89 ms at 10 logs/request. Medians of offloaded cases
+  didn't grow
+* **Without stalls offloading is slower.** Median of `stdlib_queue_orjson` was higher than of synchronous
+  `structlog_experimental_orjson` by 8 ms at 10 logs/request and by 40 ms at 400 logs/request
+* **Offloading also removes JSON serialization from request handling.** Without stalls median of `stdlib_queue_json`
+  was 100 ms lower than of `stdlib_stream_json`; with `orjson` both medians were 230 ms. At 400 logs/request `orjson`
+  lowered median of synchronous cases by 40–80 ms compared to `json`
+* **Offloaded loggers keep up with load.** Queue-based and fire-and-forget cases delivered 100% of logs before load
+  ended with both collector profiles
+* **`await` on logging calls is the slowest option.** Median of `aiologger_with_await_*` was 2.5–7 times higher than
+  of offloaded cases. `structlog_async_*` runs each logging call in thread pool and sustained ~25 of 100 RPS
+* **`aiologger` without `await` has wide tails.** Without stalls at 400 logs/request its p95 was 3.1–3.4 times its
+  median, other cases without `await` had 2.0–2.4
+
+Limitations of these conclusions: one run per configuration; 10 logs/request run without pauses lasted 20 s instead of
+60 s; stall pattern is synthetic, so effect size in production depends on how often and how long log collector stalls.
+Not investigated: why stalls delayed 77% of requests at 10 logs/request, while collector paused for one sixth of time,
+and why ~30 KB written during a stall at 10 logs/request didn't fit into pipe buffer (pipe capacity wasn't measured)
+
+# Recommendations
+
+* **Don't use async logging APIs.** `await` on logging calls made median 2.5–7 times higher than offloading to
+  a thread, and `aiologger` without `await` had the widest tails
+* **By default, log synchronously with stdlib `logging` and `orjson` formatter.** At 400 logs/request `orjson` lowered
+  median of synchronous handlers by 40–80 ms compared to `json`. `structlog` with `orjson` performed the same or
+  slightly better
+* **If `stdout` can stall, offload writes with stdlib `QueueHandler` + `QueueListener`.** Trade-offs:
+    * gain: collector stall doesn't block event loop. Here a 100 ms stall added ~90 ms to median of synchronous logging
+      at 10 and at 400 logs/request and didn't change median of queue-based logging
+    * cost: without stalls queue-based median was up to 40 ms higher than of the fastest synchronous setup
+    * records still in queue are lost if process crashes
+    * unbounded queue grows in memory while `stdout` stalls; with bounded queue `QueueHandler` drops records when
+      queue is full
+    * listener thread has to be started on app startup and stopped on shutdown
+
+`stdout` stalls when process that reads it falls behind:
+
+* Docker in default `blocking` log delivery mode, especially with network log drivers (`fluentd`, `gelf`, `awslogs`,
+  `splunk`)
+* Kubernetes when node disk is slow or busy: container runtime writes logs to it
+* systemd service when `journald` is overloaded
+* pipe to slow process, slow SSH session, terminal paused with Ctrl+S
+
+`stdout` rarely stalls when redirected to file on local disk or to `/dev/null`, and in Docker `non-blocking` mode, which
+drops logs when its buffer is full. This list describes common setups and wasn't measured here
 
 # TLDR
 
 > — So, should we handle logs asynchronously?
 >
-> — Only if you can afford to sacrifice low and **stable** latency
-
-If in doubt, use synchronous logging to `stdout` with `orjson`, and avoid `await` in the hot path
+> — Not with async logging APIs. Log synchronously with `orjson` formatter.
+> If `stdout` can stall, offload writes to a thread with `QueueHandler` + `QueueListener`

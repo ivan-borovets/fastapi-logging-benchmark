@@ -11,12 +11,16 @@ LOCUSTFILE_PATH: Final[Path] = (
     BASE_DIR_PATH / "src" / "benchmark" / "adapters" / "locustfile.py"
 )
 OUTPUT_DIR_PATH: Final[Path] = BASE_DIR_PATH / "results"
-N_USERS_DEFAULT: Final[int] = 50
-SPAWN_RATE_DEFAULT: Final[int] = 10
+TARGET_RPS_DEFAULT: Final[int] = 100
 
-# C = 100 rps / 50 users = 2 rps / user
-# For (2 rps / user) set `-u 50` with cli
-CONSTANT_THROUGHPUT_DEFAULT: Final[int] = 2
+# User waits for response before next request.
+# 400 users at 0.25 RPS keep 100 RPS until response time exceeds 4s
+N_USERS_DEFAULT: Final[int] = 400
+SPAWN_RATE_DEFAULT: Final[int] = 100
+CONSTANT_THROUGHPUT_DEFAULT: Final[float] = TARGET_RPS_DEFAULT / N_USERS_DEFAULT
+
+# On stop, wait for in-flight requests, otherwise they are missing from stats
+STOP_TIMEOUT_S_DEFAULT: Final[int] = 10
 
 NEW_FLAG_NAME: Final[str] = "--n-logs-req"
 NEW_FLAG_HELP: Final[str] = "Logs per request (n)"

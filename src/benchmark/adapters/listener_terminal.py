@@ -74,9 +74,11 @@ class TerminalProgressListener(ProgressListener):
             RESULT {md.bench_title} ({md.n_logs_req} logs/req, {md.run_time})
             Requests:   {s.requests} (failures: {s.failures})
             Median:     {s.median_ms:.2f} ms
+            p95 / p99:  {s.p95_ms:.2f} / {s.p99_ms:.2f} ms
             Average:    {s.avg_ms:.2f} ms
             Min / Max:  {s.min_ms:.2f} / {s.max_ms:.2f} ms
             RPS:        {s.actual_rps:.2f}
+            Log lines delivered during load: {br.log_lines_delivered}
             """
         )
 

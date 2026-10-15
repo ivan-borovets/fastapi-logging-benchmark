@@ -1,7 +1,7 @@
 import subprocess as sp
 from pathlib import Path
 
-from benchmark.adapters.locust_constants import NEW_FLAG_NAME
+from benchmark.adapters.locust_constants import NEW_FLAG_NAME, STOP_TIMEOUT_S_DEFAULT
 from benchmark.application.ports import LoadTester
 from benchmark.application.dtos import RunContext
 from benchmark.domain.bench_case import BenchCase
@@ -23,10 +23,10 @@ class LocustLoadTester(LoadTester):
     def run(self, bench_case: BenchCase, context: RunContext) -> Path:
         self._output_dir.mkdir(parents=True, exist_ok=True)
         host_url = f"http://{context.host}:{context.port}"
-        csv_prefix = (
+        stats_prefix = (
             self._output_dir / f"{bench_case.n_logs_req}logs_{bench_case.title}"
         )
-        stats_csv = csv_prefix.with_name(f"{csv_prefix.name}{'_stats.csv'}")
+        stats_json = stats_prefix.with_name(f"{stats_prefix.name}.json")
 
         cmd = [
             "locust",
@@ -39,12 +39,14 @@ class LocustLoadTester(LoadTester):
             str(self._spawn_rate),
             "-t",
             bench_case.run_time,
+            "--stop-timeout",
+            str(STOP_TIMEOUT_S_DEFAULT),
             "--tag",
             bench_case.title,
             "--host",
             host_url,
-            "--csv",
-            str(csv_prefix),
+            "--json-file",
+            str(stats_prefix),
             "--only-summary",
             f"{NEW_FLAG_NAME}",
             str(bench_case.n_logs_req),
@@ -56,4 +58,4 @@ class LocustLoadTester(LoadTester):
             check=True,
         )
 
-        return stats_csv
+        return stats_json

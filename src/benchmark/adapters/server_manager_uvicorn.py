@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import socket
 from typing import Final, Iterator
 import subprocess as sp
+from benchmark.adapters.log_sink import LogSinkProfile, PipeDrain
 from benchmark.application.ports import ServerManager
 from benchmark.application.dtos import RunContext
 from benchmark.domain.app_factory import AppFactory
@@ -17,24 +18,35 @@ STOP_TIMEOUT_S: Final[float] = 5.0
 
 
 class UvicornServerManager(ServerManager):
-    def __init__(self, host: str = LOCALHOST) -> None:
+    def __init__(self, sink_profile: LogSinkProfile, host: str = LOCALHOST) -> None:
+        self._sink_profile = sink_profile
         self._host = host
-        self._port: int | None = None
-        self._process: sp.Popen[bytes] | None = None
+        self._drain: PipeDrain | None = None
 
     @contextmanager
     def run(self, bench_case: BenchCase) -> Iterator[RunContext]:  # type: ignore
-        self._port = self._pick_free_port()
-        self._process = self._start_server(bench_case.app_factory, self._port)
+        port = self._pick_free_port()
+        process = self._start_server(bench_case.app_factory, port)
+        if process.stdout is None:
+            raise RuntimeError("Server output pipe is not attached")
+        self._drain = PipeDrain(process.stdout, self._sink_profile)
+        self._drain.start()
 
-        health_path = f"/{bench_case.title}?n=1"
-        if not self._wait_ready(self._port, health_path, timeout_s=STARTUP_TIMEOUT_S):
-            raise RuntimeError(f"Server not ready at {health_path}")
+        try:
+            health_path = f"/{bench_case.title}?n=1"
+            if not self._wait_ready(port, health_path, timeout_s=STARTUP_TIMEOUT_S):
+                raise RuntimeError(f"Server not ready at {health_path}")
 
-        yield RunContext(self._host, self._port)
+            yield RunContext(self._host, port)
+        finally:
+            self._stop_server(process)
+            self._drain.join()
+            self._drain = None
 
-        self._stop_server()
-        self._port, self._process = None, None
+    def log_lines_delivered(self) -> int:
+        if self._drain is None:
+            raise RuntimeError("Server is not running")
+        return self._drain.lines
 
     def _pick_free_port(self) -> int:
         with socket.socket() as s:
@@ -57,8 +69,8 @@ class UvicornServerManager(ServerManager):
         return sp.Popen(
             cmd,
             stdin=sp.DEVNULL,
-            stdout=sp.DEVNULL,
-            stderr=sp.DEVNULL,
+            stdout=sp.PIPE,
+            stderr=sp.STDOUT,
             start_new_session=True,
         )
 
@@ -81,13 +93,13 @@ class UvicornServerManager(ServerManager):
 
         return False
 
-    def _stop_server(self) -> None:
-        if self._process is None or self._process.poll() is not None:
+    def _stop_server(self, process: sp.Popen[bytes]) -> None:
+        if process.poll() is not None:
             return
 
-        self._process.terminate()
+        process.terminate()
         try:
-            self._process.wait(timeout=STOP_TIMEOUT_S)
+            process.wait(timeout=STOP_TIMEOUT_S)
         except sp.TimeoutExpired:
-            self._process.kill()
-            self._process.wait()
+            process.kill()
+            process.wait()
